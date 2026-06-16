@@ -1,8 +1,4 @@
-# DWB/BYK Hyperspectral Classification
-
-This repository contains the core code for hyperspectral classification experiments on VNIR/SWIR data.
-
-The trained weights and preprocessing artifacts are intentionally not included in Git. They should be downloaded separately from the project artifact link/cloud drive and placed in the repository root before evaluation.
+# A fine-grained diagnostic framework for subclinical rice disease detection: integrating spatiotemporal infection dynamics and mechanism alignment
 
 ## What Is Included
 
