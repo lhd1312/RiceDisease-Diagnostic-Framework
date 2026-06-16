@@ -30,14 +30,6 @@ The saved `Ensemble_Final.h5` was likely produced with the default `A=0.5, B=0.5
 | `ARCHIVE/Best_Model_B_msc.h5` and related `Best_Model_B_*` files | Best folds from 5-fold Model B experiments | `scripts/cross_validate_pca_branch.py` | Validation/ablation artifacts. |
 | `ARCHIVE/Fusion_5Fold_Result.png` | 5-fold fusion comparison figure | `scripts/cross_validate_fusion.py` | Cross-validation result figure. |
 
-## Timeline Summary
-
-- 2025-11-18: Raw/RMC ablation models, PCA/PM ablation models, and `Ensemble_Final.h5` were created.
-- 2025-11-19: `model_MSC_CBAM.h5` single-model result was created.
-- 2025-11-26: 5-fold validation scripts and best-fold artifacts were created.
-- 2026-01-28: Ensemble weight stability and noise robustness analyses were run.
-- 2026-04-07: Additional ablation/model reading work appears in `scripts/inspect_ablation_models.py` and historical archive outputs.
-
 ## Recommended GitHub Narrative
 
 Use the following wording in a paper/code release:
