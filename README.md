@@ -1,4 +1,7 @@
 # A fine-grained diagnostic framework for subclinical rice disease detection: integrating spatiotemporal infection dynamics and mechanism alignment
+<img width="5000" height="2812" alt="图1" src="https://github.com/user-attachments/assets/6821d2dc-8bbf-4c70-a29f-7fd2eda05ff7" />
+
+<img width="4961" height="5574" alt="未标题-6  已恢复" src="https://github.com/user-attachments/assets/381913d9-d3d7-4a22-b446-c1a09a211c47" />
 
 ## What Is Included
 
