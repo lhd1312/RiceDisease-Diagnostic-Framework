@@ -20,16 +20,6 @@ Path aliases:
 
 The saved `Ensemble_Final.h5` was likely produced with the default `A=0.5, B=0.5` weight because `meta_model_weighted_A.pkl` is not present in the workspace. Later weight stability analysis found the best test-set weight at `A=0.51` or `A=0.52`, with accuracy `0.9271523178807947`; the 0.50 weight gives `0.9205298013245033`.
 
-## Important Non-Final or Secondary Artifacts
-
-| Artifact | Role | Likely source script | Notes |
-| --- | --- | --- | --- |
-| `ARTIFACTS/model_MSC_CBAM.h5` | Later single raw-spectrum MSC+CBAM model | Original `train_model_A copy 2.py` | Timestamp is later than the ensemble branch files, but later evaluation/robustness scripts do not use this file. |
-| `ARTIFACTS/scaler_MSC_CBAM.pkl` | Scaler for `model_MSC_CBAM.h5` | Original `train_model_A copy 2.py` | Kept for the single-model branch. |
-| `ARCHIVE/model_MSC_CBAM_best_fold.h5` | Best single fold from 5-fold Model A experiment | `scripts/cross_validate_raw_branch.py` | Validation experiment artifact, not the stitched final ensemble. |
-| `ARCHIVE/Best_Model_B_msc.h5` and related `Best_Model_B_*` files | Best folds from 5-fold Model B experiments | `scripts/cross_validate_pca_branch.py` | Validation/ablation artifacts. |
-| `ARCHIVE/Fusion_5Fold_Result.png` | 5-fold fusion comparison figure | `scripts/cross_validate_fusion.py` | Cross-validation result figure. |
-
 ## Recommended GitHub Narrative
 
 Use the following wording in a paper/code release:
