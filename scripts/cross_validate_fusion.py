@@ -1,256 +1,232 @@
-import pandas as pd
-import numpy as np
+"""Reproduce the revised paper's grouped evaluation on the paired spectral workbooks."""
+
+import argparse
+from collections import Counter, defaultdict
+import json
 from pathlib import Path
-from tqdm import tqdm
-from scipy.signal import savgol_filter
-from sklearn.preprocessing import StandardScaler
-from sklearn.model_selection import StratifiedKFold
-from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
-from sklearn.decomposition import PCA
-from sklearn.utils.class_weight import compute_class_weight
-import tensorflow as tf
-from tensorflow.keras.models import Model
-from tensorflow.keras.layers import (
-    Dense, Conv1D, MaxPooling1D, Flatten, Dropout, BatchNormalization, 
-    SeparableConv1D, Input, Add, Activation, 
-    GlobalAveragePooling1D, GlobalMaxPooling1D, Reshape, Multiply, Concatenate
-)
-from tensorflow.keras.utils import to_categorical
-from tensorflow.keras.callbacks import EarlyStopping
-from tensorflow.keras.optimizers import Adam
-import tensorflow.keras.backend as K
-import matplotlib.pyplot as plt
 
-plt.rcParams['font.sans-serif'] = ['SimHei']
-plt.rcParams['axes.unicode_minus'] = False
-np.random.seed(42)
-tf.random.set_seed(42)
+import numpy as np
+from sklearn.model_selection import StratifiedGroupKFold, StratifiedKFold
 
-# ==============================================================================
-# 1. 定义两个模型架构
-# ==============================================================================
+import nested_evaluation as nested
+from spectra import load_data
 
-# --- 公共模块 ---
-def cbam_block(input_feature, ratio=8):
-    """CBAM Attention Block"""
-    channel_axis = -1
-    filters = input_feature.shape[channel_axis]
-    shared_layer_one = Dense(filters // ratio, activation='relu', kernel_initializer='he_normal', use_bias=True, bias_initializer='zeros')
-    shared_layer_two = Dense(filters, kernel_initializer='he_normal', use_bias=True, bias_initializer='zeros')
-    
-    avg_pool = GlobalAveragePooling1D()(input_feature); avg_pool = Reshape((1, filters))(avg_pool)
-    avg_pool = shared_layer_one(avg_pool); avg_pool = shared_layer_two(avg_pool)
-    max_pool = GlobalMaxPooling1D()(input_feature); max_pool = Reshape((1, filters))(max_pool)
-    max_pool = shared_layer_one(max_pool); max_pool = shared_layer_two(max_pool)
-    
-    cbam_feature = Add()([avg_pool, max_pool]); cbam_feature = Activation('sigmoid')(cbam_feature)
-    x_refined_c = Multiply()([input_feature, cbam_feature])
-    
-    avg_pool = tf.reduce_mean(x_refined_c, axis=channel_axis, keepdims=True)
-    max_pool = tf.reduce_max(x_refined_c, axis=channel_axis, keepdims=True)
-    concat = Concatenate(axis=channel_axis)([avg_pool, max_pool])
-    cbam_feature = Conv1D(filters=1, kernel_size=7, strides=1, padding='same', activation='sigmoid', kernel_initializer='he_normal', use_bias=False)(concat)
-    x_refined_s = Multiply()([x_refined_c, cbam_feature])
-    return x_refined_s
 
-def multiscale_block(inputs):
-    """Multi-Scale Convolution Block"""
-    b1 = SeparableConv1D(32, kernel_size=3, padding='same', activation='relu')(inputs)
-    b2 = SeparableConv1D(32, kernel_size=5, padding='same', activation='relu')(inputs)
-    b3 = SeparableConv1D(32, kernel_size=7, padding='same', activation='relu')(inputs)
-    x = Concatenate()([b1, b2, b3]); x = BatchNormalization()(x)
-    return x
+KEYS = ("sample_id", "pot_id", "acquisition_round", "test_fold", "truth")
+TASKS = ("stage", "early")
+EARLY_DAYS = (1, 2, 3)
 
-# --- 模型 A: Raw Data + MSC + CBAM ---
-def build_model_A(input_shape, n_classes):
-    inputs = Input(shape=input_shape)
-    x = multiscale_block(inputs)
-    x = MaxPooling1D(2)(x)
-    x = SeparableConv1D(64, 3, activation='relu', padding='same')(x)
-    x = BatchNormalization()(x)
-    x = cbam_block(x)
-    x = MaxPooling1D(2)(x)
-    x = Flatten()(x)
-    x = Dense(192, activation='relu')(x)
-    x = Dropout(0.5)(x)
-    outputs = Dense(n_classes, activation='softmax')(x)
-    return Model(inputs, outputs, name="Model_A_Raw")
 
-# --- 模型 B: PCA + MSC (无CBAM, 根据您之前的代码) ---
-def build_model_B(input_shape, n_classes):
-    inputs = Input(shape=input_shape)
-    x = multiscale_block(inputs)
-    x = MaxPooling1D(2)(x)
-    x = SeparableConv1D(96, 7, activation='relu', padding='same')(x)
-    x = BatchNormalization()(x)
-    x = MaxPooling1D(2)(x)
-    # Model B 在您之前的代码中好像没有加 CBAM，如果需要请在这里加上
-    x = Flatten()(x)
-    x = Dense(256, activation='relu')(x)
-    x = Dropout(0.5)(x)
-    outputs = Dense(n_classes, activation='softmax')(x)
-    return Model(inputs, outputs, name="Model_B_PCA")
+def make_plan(x, original_labels, pots, groups):
+    """Recover the locked outer folds from the original row order and labels."""
+    outer_cv = StratifiedGroupKFold(n_splits=5, shuffle=True, random_state=42)
+    outer_ids = np.zeros(len(pots), dtype=int)
+    plan = {}
+    for outer, (development, test) in enumerate(outer_cv.split(x, original_labels, pots), 1):
+        outer_ids[test] = outer
+        dev_pots, first = np.unique(pots[development], return_index=True)
+        dev_groups = groups[development][first]
+        inner_cv = StratifiedKFold(n_splits=3, shuffle=True, random_state=4200 + outer)
+        inner_map = {
+            pot: inner
+            for inner, (_, validation) in enumerate(inner_cv.split(dev_pots, dev_groups), 1)
+            for pot in dev_pots[validation]
+        }
+        test_pots = set(pots[test])
+        if len(inner_map) != len(dev_pots) or test_pots.intersection(inner_map):
+            raise ValueError(f"Invalid pot partitions in outer fold {outer}.")
+        plan[outer] = test_pots, inner_map
+    if np.any(outer_ids == 0) or sum(len(test) for test, _ in plan.values()) != len(set(pots)):
+        raise ValueError("The outer folds must test each pot once.")
+    return outer_ids, plan
 
-# ==============================================================================
-# 2. 数据加载 (保持不变)
-# ==============================================================================
-DATA_DIR = Path('DATA'); VNIR_FILE = DATA_DIR / 'VNIR.xlsx'; SWIR_FILE = DATA_DIR / 'SWIR.xlsx'
-SHEET_NAMES = [
-    'CK', 'DWB_01_Resistant', 'DWB_02_Resistant', 'DWB_03_Resistant', 'DWB_04_Resistant',
-    'DWB_05_Susceptible', 'BYK_01_Resistant', 'BYK_02_Resistant', 'BYK_03_Resistant', 'BYK_04_Susceptible'
-]
-label_map = {name: i for i, name in enumerate(SHEET_NAMES)}
-N_CLASSES = 10; N_COMPONENTS_PCA = 100
 
-# --- 数据加载 (保持不变) ---
-features = []; labels = []; all_bands = np.array([])
-print("开始加载和合并数据 (Ensemble)...")
-with pd.ExcelFile(VNIR_FILE) as vnir_xls, pd.ExcelFile(SWIR_FILE) as swir_xls:
-    for sheet in tqdm(SHEET_NAMES, desc="Processing sheets"):
-        vnir_data = pd.read_excel(vnir_xls, sheet_name=sheet, header=0)
-        swir_data = pd.read_excel(swir_xls, sheet_name=sheet, header=0)
-        if not all_bands.any():
-            vnir_bands = vnir_data.columns.astype(float); swir_bands = swir_data.columns.astype(float)
-            all_bands = np.concatenate([vnir_bands, swir_bands])
-        combined_data = pd.concat([vnir_data, swir_data], axis=1); features.append(combined_data)
-        current_labels = np.full(combined_data.shape[0], label_map[sheet]); labels.append(current_labels)
-X_orig = pd.concat(features, ignore_index=True).values; y_orig = np.concatenate(labels)
+def prepare(data_dir):
+    x, original, metadata, _ = load_data(data_dir)
+    if x.shape != (1005, 697):
+        raise ValueError(f"Expected 1,005 spectra with 697 retained wavelengths, got {x.shape}.")
+    pots = np.asarray([row[3] for row in metadata])
+    days = np.asarray([row[4] for row in metadata])
+    groups = nested.disease_group(original)
+    by_pot = defaultdict(set)
+    for pot, group in zip(pots, groups):
+        by_pot[pot].add(group)
+    if any(len(labels) != 1 for labels in by_pot.values()):
+        raise ValueError("Each pot must belong to a single experimental group.")
+    outer_ids, plan = make_plan(x, original, pots, groups)
 
-# 裁剪
-WAVELENGTH_RANGES_TO_KEEP = [(420, 900), (1000, 1700)]
-idx_keep = np.zeros(all_bands.shape, dtype=bool)
-for (start, end) in WAVELENGTH_RANGES_TO_KEEP:
-    idx_keep = idx_keep | ((all_bands >= start) & (all_bands <= end))
-X_orig = X_orig[:, idx_keep]
-N_BANDS_RAW = X_orig.shape[1]
+    # Preserve the frozen folds, then apply the same stage correction as the revised run.
+    stage = original.copy()
+    correction = (days == 5) & (original == 8)
+    if correction.sum() != 20:
+        raise ValueError("Expected 20 round-5 entries with the original BLB-A3 code.")
+    stage[correction] = 9
+    np.testing.assert_array_equal(np.bincount(stage), [262, 60, 60, 80, 80, 176, 41, 41, 41, 164])
 
-# 预处理
-print("SG滤波 + SNV...")
-X_processed = savgol_filter(X_orig, window_length=11, polyorder=3, axis=1)
-mean_row = np.mean(X_processed, axis=1, keepdims=True)
-std_row = np.std(X_processed, axis=1, keepdims=True)
-X_processed = (X_processed - mean_row) / (std_row + 1e-8)
+    # The matched-round cohort uses the original common-round field, with all three rounds
+    # required per pot. The display-only date correction for Fig. 8B is separate.
+    early_day_sets = defaultdict(set)
+    for pot, day, label in zip(pots, days, stage):
+        if day in EARLY_DAYS and label not in (5, 9):
+            early_day_sets[pot].add(day)
+    early = np.array([
+        early_day_sets[pot] == set(EARLY_DAYS) and day in EARLY_DAYS
+        for pot, day in zip(pots, days)
+    ])
+    expected = {(day, group): count for day in EARLY_DAYS
+                for group, count in enumerate((40, 60, 41))}
+    if Counter(zip(days[early], groups[early])) != expected:
+        raise ValueError("Unexpected group counts in the matched-round cohort.")
 
-# ==============================================================================
-# 3. 5折交叉验证 (End-to-End Fusion)
-# ==============================================================================
-k_folds = 5
-skf = StratifiedKFold(n_splits=k_folds, shuffle=True, random_state=42)
+    # Pooled prediction order in the original runs was by fold, then workbook row order.
+    order = np.argsort(outer_ids, kind="stable")
+    cohorts = {}
+    for task, ids, labels, size in (
+        ("stage", order, stage, 10),
+        ("early", order[early[order]], groups, 3),
+    ):
+        rows = [dict(zip(KEYS, (metadata[i][2], pots[i], int(days[i]),
+                                int(outer_ids[i]), int(labels[i])))) for i in ids]
+        cohorts[task] = rows, x[ids], labels[ids], pots[ids], groups[ids], np.arange(size)
+    return cohorts, plan
 
-results_A = []
-results_B = []
-results_Fusion = []
-best_weights_log = []
 
-print(f"\n{'='*40}")
-print(f"开始 5折交叉验证: 双模型加权融合")
-print(f"{'='*40}")
+def export_plan(output, cohorts, plan):
+    pot_groups = {row["pot_id"]: int(group) for row, group in zip(cohorts["stage"][0], cohorts["stage"][4])}
+    nested.write_csv(
+        output / "pot_folds.csv",
+        ("outer_fold", "pot_id", "disease_group", "outer_role", "inner_validation_fold"),
+        ((fold, pot, pot_groups[pot], "test" if pot in test else "development", inner_map.get(pot, ""))
+         for fold, (test, inner_map) in plan.items() for pot in sorted(pot_groups)),
+    )
+    for task, (rows, _, _, pots, _, _) in cohorts.items():
+        nested.write_csv(output / f"{task}_cohort.csv", KEYS, ([row[key] for key in KEYS] for row in rows))
+        print(f"{task}: {len(rows)} observations from {len(set(pots))} pots", flush=True)
 
-for fold_no, (train_index, val_index) in enumerate(skf.split(X_processed, y_orig)):
-    print(f"\n>>> Fold {fold_no+1} / {k_folds}")
-    
-    # --- 1. 数据划分 ---
-    X_train, X_val = X_processed[train_index], X_processed[val_index]
-    y_train, y_val = y_orig[train_index], y_orig[val_index]
-    
-    # --- 2. 准备 Model A 数据 (Raw Scaled) ---
-    scaler_A = StandardScaler()
-    X_train_raw = scaler_A.fit_transform(X_train)
-    X_val_raw = scaler_A.transform(X_val)
-    X_train_cnn_A = X_train_raw.reshape(-1, N_BANDS_RAW, 1)
-    X_val_cnn_A = X_val_raw.reshape(-1, N_BANDS_RAW, 1)
-    
-    # --- 3. 准备 Model B 数据 (PCA) ---
-    scaler_B = StandardScaler()
-    X_train_scaled_B = scaler_B.fit_transform(X_train) # 独立的 scaler
-    X_val_scaled_B = scaler_B.transform(X_val)
-    
-    pca = PCA(n_components=N_COMPONENTS_PCA, random_state=42)
-    X_train_pca = pca.fit_transform(X_train_scaled_B)
-    X_val_pca = pca.transform(X_val_scaled_B)
-    X_train_cnn_B = X_train_pca.reshape(-1, N_COMPONENTS_PCA, 1)
-    X_val_cnn_B = X_val_pca.reshape(-1, N_COMPONENTS_PCA, 1)
-    
-    # --- 4. 准备标签 ---
-    y_train_cat = to_categorical(y_train, N_CLASSES)
-    y_val_cat = to_categorical(y_val, N_CLASSES)
-    cw = compute_class_weight('balanced', classes=np.unique(y_train), y=y_train)
-    cw_dict = {i: w for i, w in enumerate(cw)}
-    
-    # --- 5. 训练 Model A ---
-    print("  正在训练 Model A (Raw)...")
-    K.clear_session()
-    model_A = build_model_A((N_BANDS_RAW, 1), N_CLASSES)
-    model_A.compile(optimizer=Adam(0.001), loss='categorical_crossentropy', metrics=['accuracy'])
-    early_stop = EarlyStopping(monitor='val_loss', patience=20, restore_best_weights=True)
-    model_A.fit(X_train_cnn_A, y_train_cat, epochs=100, batch_size=32, validation_data=(X_val_cnn_A, y_val_cat), class_weight=cw_dict, callbacks=[early_stop], verbose=0)
-    
-    # 获取 A 在验证集上的预测
-    probs_A = model_A.predict(X_val_cnn_A, verbose=0)
-    acc_A = accuracy_score(y_val, np.argmax(probs_A, axis=1))
-    results_A.append(acc_A)
-    print(f"    Model A Acc: {acc_A:.4f}")
 
-    # --- 6. 训练 Model B ---
-    print("  正在训练 Model B (PCA)...")
-    # 注意：不清除 session 可能会导致显存不足，但我们需要 Model A 还在内存里。
-    # 如果显存不够，可以先 save A，clear session，再 load A。这里假设显存够用。
-    model_B = build_model_B((N_COMPONENTS_PCA, 1), N_CLASSES)
-    model_B.compile(optimizer=Adam(0.001), loss='categorical_crossentropy', metrics=['accuracy'])
-    model_B.fit(X_train_cnn_B, y_train_cat, epochs=100, batch_size=32, validation_data=(X_val_cnn_B, y_val_cat), class_weight=cw_dict, callbacks=[early_stop], verbose=0)
-    
-    # 获取 B 在验证集上的预测
-    probs_B = model_B.predict(X_val_cnn_B, verbose=0)
-    acc_B = accuracy_score(y_val, np.argmax(probs_B, axis=1))
-    results_B.append(acc_B)
-    print(f"    Model B Acc: {acc_B:.4f}")
-    
-    # --- 7. 寻找当前折的最佳融合权重 (Grid Search) ---
-    print("  寻找最佳融合权重...")
-    best_fold_acc = 0
-    best_w = 0.5
-    
-    # 在 0.0 到 1.0 之间搜索权重 (步长 0.01)
-    for w_a in np.arange(0.0, 1.01, 0.01):
-        w_b = 1.0 - w_a
-        # 加权融合
-        probs_fusion = (w_a * probs_A) + (w_b * probs_B)
-        pred_fusion = np.argmax(probs_fusion, axis=1)
-        acc_fusion = accuracy_score(y_val, pred_fusion)
-        
-        if acc_fusion > best_fold_acc:
-            best_fold_acc = acc_fusion
-            best_w = w_a
-            
-    results_Fusion.append(best_fold_acc)
-    best_weights_log.append(best_w)
-    
-    print(f"    [Fusion] Best Weight A: {best_w:.2f} | Acc: {best_fold_acc:.4f}")
-    print(f"    提升: {best_fold_acc - max(acc_A, acc_B):.4f}")
+def run(tf, models, task, cohort, plan, output, include_concat):
+    rows, features, truth, pots, groups, classes = cohort
+    blocks = []
+    for fold, (test_pots, inner_map) in plan.items():
+        test, predictions, details = nested.one_outer(
+            tf, models, task, fold, rows, features, truth, pots, groups,
+            (test_pots, inner_map), classes, output,
+        )
+        folder = output / task / f"fold_{fold}"
+        ids = np.asarray([row["sample_id"] for row in rows])
+        for seed in nested.SEEDS:
+            probabilities = []
+            for model in ("RMC", "PM_MLP"):
+                key = nested.tag(model, seed)
+                with np.load(folder / f"refit_{key}.npz", allow_pickle=False) as saved:
+                    np.testing.assert_array_equal(saved["ids"], ids[test])
+                    probabilities.append(saved["prediction"])
+            predictions[nested.tag("RMC_PM_MLP", seed)] = (
+                (probabilities[0] + probabilities[1]) / 2
+            ).argmax(axis=1)
+        if include_concat:
+            from joint_fusion import run_fold
+            from models import build_model_B_variant, build_progressive_model, feature_concat
 
-# ==============================================================================
-# 4. 汇总报告
-# ==============================================================================
-print(f"\n{'='*20} 5折交叉验证最终结果 {'='*20}")
-print(f"Model A (Mean ± Std): {np.mean(results_A)*100:.2f}% ± {np.std(results_A)*100:.2f}%")
-print(f"Model B (Mean ± Std): {np.mean(results_B)*100:.2f}% ± {np.std(results_B)*100:.2f}%")
-print(f"Fusion  (Mean ± Std): {np.mean(results_Fusion)*100:.2f}% ± {np.std(results_Fusion)*100:.2f}%")
+            factory = feature_concat(build_progressive_model, build_model_B_variant)
+            dev = np.flatnonzero(~np.isin(pots, list(test_pots)))
+            splits = []
+            for inner in nested.INNER:
+                validation = np.array([inner_map[pots[i]] == inner for i in dev])
+                splits.append((dev[~validation], dev[validation]))
+            concat_test, concat_predictions = run_fold(
+                tf, factory, features, truth, ids, (splits, dev, test),
+                folder / "feature_concat", classes,
+            )
+            np.testing.assert_array_equal(concat_test, test)
+            for seed, predictions_for_seed in zip(nested.SEEDS, concat_predictions.T):
+                predictions[nested.tag("feature_concat", seed)] = predictions_for_seed
+        blocks.append((test, predictions, details))
+    nested.summarize(task, rows, truth, classes, pots, groups, blocks, output)
+    export_seed_average(output, task, rows, truth, pots, groups)
 
-print("\n各折最佳权重 (Model A):", best_weights_log)
-avg_weight = np.mean(best_weights_log)
-print(f"建议最终使用的平均权重: A={avg_weight:.2f}, B={1-avg_weight:.2f}")
 
-# 绘图
-plt.figure(figsize=(8, 6))
-labels = ['Model A', 'Model B', 'Fusion']
-means = [np.mean(results_A), np.mean(results_B), np.mean(results_Fusion)]
-stds = [np.std(results_A), np.std(results_B), np.std(results_Fusion)]
+def export_seed_average(output, task, rows, truth, pots, groups):
+    """Average metrics across training seeds and bootstrap paired accuracy differences by pot."""
+    report_path = output / f"{task}_results.json"
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    predictions = nested.read_csv(output / f"{task}_predictions.csv")
+    folds = np.array([int(row["test_fold"]) for row in rows])
+    names = [
+        name for name in ("RMC", "PM", "RMC_PM", "weighted", "RMC_PM_MLP", "feature_concat")
+        if nested.tag(name, nested.SEEDS[0]) in report["models"]
+    ]
+    columns = {}
+    summary = {}
+    for name in names:
+        tags = [nested.tag(name, seed) for seed in nested.SEEDS]
+        columns[name] = np.array([[int(row[tag]) == label for tag in tags]
+                                  for row, label in zip(predictions, truth)]).mean(axis=1)
+        summary[name] = {
+            "accuracy": float(columns[name].mean()),
+            "macro_f1": float(np.mean([report["models"][tag]["macro_f1"] for tag in tags])),
+            "fold_sd": float(np.std([columns[name][folds == fold].mean()
+                                     for fold in nested.OUTER], ddof=1)),
+        }
+    for name in ("RMC_RMC", "PM_PM"):
+        columns[name] = np.array([int(row[name]) == label for row, label in zip(predictions, truth)])
+    all_names = list(columns)
+    boot = nested.pot_boot(np.column_stack(list(columns.values())), pots, groups)
+    for name in summary:
+        summary[name]["accuracy_ci95"] = np.quantile(boot[:, all_names.index(name)], [.025, .975]).tolist()
+    reference = all_names.index("RMC_PM")
+    comparisons = {}
+    for name, outcomes in columns.items():
+        if name != "RMC_PM":
+            delta = boot[:, reference] - boot[:, all_names.index(name)]
+            comparisons[name] = {
+                "equal_minus_comparator_accuracy": float((columns["RMC_PM"] - outcomes).mean()),
+                "ci95": np.quantile(delta, [.025, .975]).tolist(),
+            }
+    nested.write_json(output / f"{task}_seed_average.json",
+                      {"models": summary, "paired_comparisons": comparisons})
 
-plt.bar(labels, means, yerr=stds, capsize=10, color=['#a8dadc', '#457b9d', '#e63946'], alpha=0.9)
-plt.ylabel('Accuracy')
-plt.title('5-Fold CV Performance Comparison')
-plt.ylim(min(means)-0.1, 1.05)
-for i, v in enumerate(means):
-    plt.text(i, v + 0.01, f"{v*100:.2f}%", ha='center', fontweight='bold')
-plt.savefig("Fusion_5Fold_Result.png")
-plt.show()
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--data", type=Path, required=True, help="Directory containing VNIR.xlsx and SWIR.xlsx")
+    parser.add_argument("--output", type=Path, default=Path("runs/revision"))
+    parser.add_argument("--tasks", nargs="+", choices=TASKS, default=TASKS)
+    parser.add_argument("--audit-only", action="store_true", help="Export cohort and fold assignments without fitting")
+    parser.add_argument("--feature-concat", action="store_true", help="Also fit the jointly trained Table S6 comparator")
+    args = parser.parse_args()
+    cohorts, plan = prepare(args.data)
+    args.output.mkdir(parents=True, exist_ok=True)
+    lock = args.output / "protocol.json"
+    script_root = Path(__file__).resolve().parent
+    protocol = {
+        "inputs": {name: nested.digest(args.data / name) for name in ("VNIR.xlsx", "SWIR.xlsx")},
+        "code": {path.name: nested.digest(path) for path in sorted(script_root.glob("*.py"))},
+        "seeds": list(nested.SEEDS),
+        "outer_folds": len(nested.OUTER),
+        "inner_folds": len(nested.INNER),
+    }
+    if lock.exists() and json.loads(lock.read_text(encoding="utf-8")) != protocol:
+        raise SystemExit("Inputs or code changed. Choose a different --output directory.")
+    if not lock.exists():
+        nested.write_json(lock, protocol)
+    export_plan(args.output, cohorts, plan)
+    if args.audit_only:
+        return
+
+    import tensorflow as tf
+    from models import build_model_B_variant, build_progressive_model, replace_msc
+
+    for gpu in tf.config.list_physical_devices("GPU"):
+        tf.config.experimental.set_memory_growth(gpu, True)
+    factories = {
+        "RMC": (build_progressive_model, "msc_cbam", "raw"),
+        "PM": (build_model_B_variant, "msc", "pca"),
+        "PM_MLP": (replace_msc(build_model_B_variant), "mlp", "pca"),
+    }
+    for task in dict.fromkeys(args.tasks):
+        run(tf, factories, task, cohorts[task], plan, args.output, args.feature_concat)
+
+
+if __name__ == "__main__":
+    main()

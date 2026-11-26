@@ -1,31 +1,17 @@
-# Model Provenance
+# Evaluation provenance
 
-This file records the likely source and role of each important model artifact from the original workspace.
+## Revised evaluation
 
-Path aliases:
+- `scripts/spectra.py` loads and aligns the two measured sensor workbooks. It retains the manuscript's spectral bands, concatenates them in sensor order, and applies the 11-band, third-order Savitzky–Golay filter followed by observation-wise SNV.
+- `scripts/cross_validate_fusion.py` reconstructs the frozen outer folds from the original row order and stage codes. It applies the stage-code correction after the outer folds are assigned, and uses the eligible complete-round subset for early diagnosis.
+- `scripts/models.py` contains the original RMC and PM model builders extracted from the historical training scripts, plus the PM first-block MLP replacement and joint feature concatenation.
+- `scripts/nested_evaluation.py` implements the inner selection, the outer refits and test predictions, the ensemble comparisons, and the pot-level bootstrap.
+- `scripts/joint_fusion.py` implements the optional Table S6 comparison on the same outer and inner folds.
 
-- `ARTIFACTS/`: large model/preprocessing files downloaded separately from the cloud drive.
-- `ARCHIVE/`: historical experiment outputs from the original local workspace.
+The main score pools one held-out prediction per observation per seed. The two seed-wise scores are then averaged. Model fitting and selection use only the corresponding development data. Equal fusion uses a fixed weight of 0.50 for each stream. The validation-weighted comparison selects its weight from inner validation predictions.
 
-## Final Model Line
+The supplementary temporal figure uses the confirmed acquisition days for the affected RB observations. Its display-time correction does not alter the original fold assignments, the corrected stage codes, or membership of the matched-round classification cohort.
 
-| Artifact | Role | Likely source script | Notes |
-| --- | --- | --- | --- |
-| `ARTIFACTS/Ensemble_Final.h5` | Final stitched weighted ensemble | `scripts/build_ensemble_model.py` | Internally named `Ensemble_Final`; has inputs `Input_Raw_Spectra` and `Input_PCA_Spectra`; combines branch outputs through `Weight_A`, `Weight_B`, and `Weighted_Sum`. |
-| `ARTIFACTS/Ablation_msc_cbam.h5` | Raw-spectrum/RMC branch used by ensemble | `scripts/train_raw_branch_ablation.py` | Internally named `Model_msc_cbam`; this is the Model A loaded by ensemble, weight-analysis, and robustness scripts. |
-| `ARTIFACTS/Model_B_msc.h5` | PCA/PM branch used by ensemble | `scripts/train_pca_branch_ablation.py` | Internally named `Model_B_msc`; this is the Model B loaded by ensemble, weight-analysis, and robustness scripts. |
-| `ARTIFACTS/scaler_A_trimmed.pkl` | Raw branch scaler | `scripts/train_raw_branch_ablation.py` | Same SHA256 as the other scaler copies in the original final artifact folder. |
-| `ARTIFACTS/scaler_B_trimmed.pkl` | PCA branch scaler | `scripts/train_pca_branch_ablation.py` | Same SHA256 as the other scaler copies in the original final artifact folder. |
-| `ARTIFACTS/pca_B_trimmed.pkl` | PCA transform for Model B | `scripts/train_pca_branch_ablation.py` | Required before feeding `Model_B_msc.h5`. |
+## Historical implementation
 
-The saved `Ensemble_Final.h5` was likely produced with the default `A=0.5, B=0.5` weight because `meta_model_weighted_A.pkl` is not present in the workspace. Later weight stability analysis found the best test-set weight at `A=0.51` or `A=0.52`, with accuracy `0.9271523178807947`; the 0.50 weight gives `0.9205298013245033`.
-
-## Recommended GitHub Narrative
-
-Use the following wording in a paper/code release:
-
-> The final evaluated ensemble combines a raw-spectrum MSC-CBAM branch (`Ablation_msc_cbam.h5`) and a PCA-spectrum MSC branch (`Model_B_msc.h5`). The two branch outputs are fused by weighted probability averaging. The repository also includes single-model and 5-fold validation experiments for comparison.
-
-## Caution
-
-The file `xiaorong_RMC.py` is the historical script that matches `Ablation_msc_cbam.h5`. Do not "clean up" the architecture inside this script before preserving a copy, because even small changes would no longer reproduce the saved model.
+The scripts from the original submission are available in the [pre-revision commit](https://github.com/lhd1312/RiceDisease-Diagnostic-Framework/tree/f2d38c72a5187b8ccb4d62237e4753ea9fffc8de). Those scripts include the original observation-level evaluation, which was superseded by the grouped protocol described in the revision.

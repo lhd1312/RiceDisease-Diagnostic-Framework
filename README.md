@@ -1,144 +1,32 @@
-# A fine-grained diagnostic framework for subclinical rice disease detection: integrating spatiotemporal infection dynamics and mechanism alignment
-<img width="5000" height="2812" alt="图1" src="https://github.com/user-attachments/assets/6821d2dc-8bbf-4c70-a29f-7fd2eda05ff7" />
+# Mechanism-guided dual-stream hyperspectral network for early rice disease diagnosis
 
-<img width="4961" height="5574" alt="未标题-6  已恢复" src="https://github.com/user-attachments/assets/381913d9-d3d7-4a22-b446-c1a09a211c47" />
+This repository contains the core evaluation code for the revised manuscript. It evaluates wavelength-domain multiscale features (RMC) and PCA-domain multiscale features (PM) from paired pot-level VNIR/SWIR spectra. The primary classifier averages the class probabilities from RMC and PM with equal weights.
 
-## What Is Included
+## Reproduce the two classification tasks
 
-```text
-.
-├── README.md
-├── requirements.txt
-├── scripts/
-│   ├── train_raw_branch_ablation.py
-│   ├── train_pca_branch_ablation.py
-│   ├── evaluate_weighted_ensemble.py
-│   ├── build_ensemble_model.py
-│   ├── analyze_ensemble_weights.py
-│   ├── analyze_noise_robustness.py
-│   ├── analyze_noise_robustness_snr.py
-│   ├── cross_validate_raw_branch.py
-│   ├── cross_validate_pca_branch.py
-│   ├── cross_validate_fusion.py
-│   └── inspect_ablation_models.py
-└── docs/
-    └── MODEL_PROVENANCE.md
+Use Python 3.9 and the versions in `requirements.txt`. The reported runs used TensorFlow 2.10.0 with an NVIDIA GPU and scikit-learn 1.6.1. A full run trains two seeds across all outer and inner folds and can take several hours on a GPU.
+
+```sh
+python -m pip install -r requirements.txt
+python scripts/cross_validate_fusion.py --data DATA --output runs/revision --audit-only
+python scripts/cross_validate_fusion.py --data DATA --output runs/revision --feature-concat
 ```
 
-## Final Model Line
+`--audit-only` reconstructs the two cohorts and exports the pot IDs assigned to the outer test and inner validation sets without training. To run one task, pass `--tasks stage` or `--tasks early`. Add `--feature-concat` to fit the jointly trained 448-feature comparator in Table S6. The default build includes the two individual streams, the equal- and validation-weighted fusion models, same-stream and cross-seed ensembles, the PM first-block MLP replacement, and the spectral/PCA SVM comparisons.
 
-The final evaluated model line is a weighted ensemble of two branches:
+### Input files
 
-- Raw-spectrum branch: `Ablation_msc_cbam.h5`
-- PCA-spectrum branch: `Model_B_msc.h5`
+Supply the measured `VNIR.xlsx` and `SWIR.xlsx` workbooks used for the study. Spectral sheets use one row of band centres followed by one row per spectrum. The final worksheet in each file is named `盆号对应表` and contains the same six columns in both files, in this order: class sheet name, 1-based Excel row, observation ID, pot ID, acquisition round, and zero-based class code. The metadata and spectral rows must preserve the original order. The spectral dataset is available from the corresponding author upon reasonable request after publication, as described in the manuscript.
 
-The ensemble evaluation scripts load:
+The script pairs sensor records, selects the 697 retained wavelengths, and applies Savitzky–Golay smoothing and standard normal variate normalisation to each observation. The standardiser and PCA are fitted within each training partition. The historical outer split is reconstructed using the original workbook labels with pot grouping and seed 42. The classifier uses the stage codes after applying the revision's 20-record BLB label correction. The matched-round task uses pots with valid observations on all three common acquisition rounds 1–3. The three inner folds select training duration and comparator settings using only outer development pots.
 
-- `Ablation_msc_cbam.h5`
-- `Model_B_msc.h5`
-- `scaler_A_trimmed.pkl`
-- `scaler_B_trimmed.pkl`
-- `pca_B_trimmed.pkl`
+## Outputs and reference results
 
-`Ensemble_Final.h5` is a stitched Keras model built from the same two branches. Because it contains Lambda layers, the branch models plus explicit evaluation scripts are safer for reproducibility across TensorFlow/Keras versions.
+| Task | Pots | Observations | Equal fusion accuracy | Macro-F1 |
+| --- | ---: | ---: | ---: | ---: |
+| Ten-class disease-stage classification | 181 | 1,005 | 92.74% | 91.31% |
+| Matched-round presymptomatic three-class classification | 141 | 423 | 91.73% | 91.93% |
 
-## External Files
+The table gives the mean of the pooled outer-test metrics from training seeds 42 and 143. The runner writes cohort and fold CSVs, separate outer-fold selections, pooled prediction CSVs, per-seed metrics and seed-averaged results. Confidence intervals for accuracy and paired differences use stratified resampling of pots. Select a new output directory when changing the inputs or code. Neural results can vary with hardware and numerical libraries.
 
-After downloading artifacts from the cloud drive, place the required files like this:
-
-```text
-.
-├── Ablation_msc_cbam.h5
-├── Model_B_msc.h5
-├── scaler_A_trimmed.pkl
-├── scaler_B_trimmed.pkl
-├── pca_B_trimmed.pkl
-└── DATA/
-    ├── VNIR.xlsx
-    └── SWIR.xlsx
-```
-
-Optional artifacts:
-
-- `Ensemble_Final.h5`
-- `Ablation_baseline.h5`
-- `Ablation_msc.h5`
-- `Model_B_baseline.h5`
-- `Model_B_cbam.h5`
-- `Model_B_msc_cbam.h5`
-- `model_MSC_CBAM.h5`
-- `scaler_MSC_CBAM.pkl`
-
-## Data Format
-
-The scripts expect two Excel files:
-
-- `DATA/VNIR.xlsx`
-- `DATA/SWIR.xlsx`
-
-Expected sheet names:
-
-- `CK`
-- `DWB_01_Resistant`
-- `DWB_02_Resistant`
-- `DWB_03_Resistant`
-- `DWB_04_Resistant`
-- `DWB_05_Susceptible`
-- `BYK_01_Resistant`
-- `BYK_02_Resistant`
-- `BYK_03_Resistant`
-- `BYK_04_Susceptible`
-
-## Environment
-
-```bash
-python -m venv .venv
-.venv\Scripts\activate
-pip install -r requirements.txt
-```
-
-## Usage
-
-Run commands from the repository root, not from inside `scripts/`, because the historical scripts use relative paths such as `DATA/VNIR.xlsx` and `Ablation_msc_cbam.h5`.
-
-Train the two branch model families:
-
-```bash
-python scripts/train_raw_branch_ablation.py
-python scripts/train_pca_branch_ablation.py
-```
-
-Evaluate the weighted ensemble:
-
-```bash
-python scripts/evaluate_weighted_ensemble.py
-```
-
-Build the stitched ensemble H5:
-
-```bash
-python scripts/build_ensemble_model.py
-```
-
-Additional analyses:
-
-```bash
-python scripts/analyze_ensemble_weights.py
-python scripts/analyze_noise_robustness.py
-python scripts/analyze_noise_robustness_snr.py
-```
-
-5-fold validation experiments:
-
-```bash
-python scripts/cross_validate_raw_branch.py
-python scripts/cross_validate_pca_branch.py
-python scripts/cross_validate_fusion.py
-```
-
-## Notes
-
-- Model weights, preprocessors, and Excel data are ignored by `.gitignore`.
-- `Ablation_msc_cbam.h5` is about 103 MB, which exceeds GitHub's normal 100 MB file limit.
-- Use a cloud drive, GitHub Releases, Zenodo, or Git LFS for large artifacts.
-- See `docs/MODEL_PROVENANCE.md` for the mapping between historical filenames and final model usage.
+The public files are the main evaluation and selected comparators. Additional manuscript analyses and the full spectral dataset follow the access arrangements in the manuscript.

@@ -1,11 +1,6 @@
-numpy
-pandas
-scipy
-scikit-learn
-tensorflow
-matplotlib
-seaborn
-tqdm
-joblib
-openpyxl
-h5py
+numpy==1.26.4
+scipy==1.13.1
+scikit-learn==1.6.1
+openpyxl==3.1.5
+tensorflow==2.10.0
+protobuf>=3.9.2,<3.20
